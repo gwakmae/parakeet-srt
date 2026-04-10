@@ -1,10 +1,35 @@
-# Python-generated files
+```
+# Python 관련 파일 및 폴더 무시
 __pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
+*.pyc
+*.pyo
 
-# Virtual environments
-.venv
+# C/C++ 관련 파일 및 폴더 무시
+build/
+bin/
+Debug/
+Release/
+
+# IDE 설정 파일 무시 (PyCharm, VSCode 등)
+.idea/
+.vscode/
+
+# 빌드 시 생성되는 파일 무시
+*.obj
+*.exe
+*.dll
+*.lib
+
+# 의존성 관리 파일 무시
+*.lock
+uv.lock
+
+# 로그 및 임시 파일 무시
+*.log
+*.tmp
+
+# 기타 언어 관련 파일 무시
+*.qml
+*.sip
+*.pyx
+```
