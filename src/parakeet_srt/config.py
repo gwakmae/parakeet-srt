@@ -1,3 +1,4 @@
+# src/parakeet_srt/config.py
 """프로젝트 전역 설정"""
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,11 +12,9 @@ class Config:
     # ── 오디오 전처리 ──
     sample_rate: int = 16_000
     mono: bool = True
-    # local attention으로 최대 3시간 가능하지만, 안전하게 20분 단위 청크
-    max_chunk_seconds: float = 1200.0  # 20분
+    max_chunk_seconds: float = 1200.0
 
     # ── SRT 포맷 기본값 ──
-    # 일반 사용자는 건드리지 않아도 되게 자동 포맷팅 기준으로 설계
     max_chars_per_line: int = 42
     max_lines_per_sub: int = 2
     min_gap_ms: int = 100
@@ -29,6 +28,15 @@ class Config:
     hard_cps = 18.5
     enable_spacy = False
     spacy_model: str = "en_core_web_sm"
+
+    # ── 번역 ──
+    translate_enabled: bool = False
+    translate_ollama_url: str = "http://localhost:11434"
+    translate_model: str = "translategemma:12b"
+    translate_source_lang: str = "en"
+    translate_target_lang: str = "ko"
+    translate_batch_size: int = 5
+    translate_temperature: float = 0.1
 
     # ── 출력 ──
     output_dir: Path = field(default_factory=lambda: Path("./output"))

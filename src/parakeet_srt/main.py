@@ -1,16 +1,17 @@
-# C:/Users/Public/Documents/Python_Code/자막작업/parakeet-srt/src/parakeet_srt/main.py
+# src/parakeet_srt/main.py
 """진입점: CLI 또는 GUI 모드"""
 from __future__ import annotations
 
-# ──────────────────────────────────────────────────────────────
-# ⚠ PyTorch 2.9.x Windows 버그 대응:
-#   PyQt6보다 torch를 먼저 import해야 c10.dll 로드 실패 방지
-#   https://github.com/pytorch/pytorch/issues/166628
-# ──────────────────────────────────────────────────────────────
 import os
 import platform
+import sys
+import argparse
 
-if platform.system() == "Windows":
+
+def _preload_c10_dll():
+    """PyTorch 2.9.x Windows 버그 대응: c10.dll 사전 로드."""
+    if platform.system() != "Windows":
+        return
     import ctypes
     from importlib.util import find_spec
     try:
@@ -21,15 +22,6 @@ if platform.system() == "Windows":
                 ctypes.CDLL(os.path.normpath(_dll))
     except Exception:
         pass
-
-import torch          # noqa: F401  — 반드시 PyQt6보다 먼저!
-import torchaudio     # noqa: F401
-# ──────────────────────────────────────────────────────────────
-
-import argparse
-import sys
-import time
-from pathlib import Path
 
 
 def main():
@@ -55,7 +47,13 @@ def main():
         launch_gui()
         return
 
-    # CLI 모드
+    # CLI 모드 — torch 필요하므로 여기서 동기 로드
+    _preload_c10_dll()
+    import torch          # noqa: F401
+    import torchaudio     # noqa: F401
+
+    import time
+    from pathlib import Path
     from .audio_utils import ensure_wav_16k_mono, split_audio_chunks
     from .config import Config
     from .srt_generator import write_srt
@@ -101,7 +99,6 @@ def main():
             results.append(srt_path)
 
     finally:
-        # CLI 모드에서도 GPU 메모리 확실히 해제
         transcriber.release_model()
 
     elapsed = time.perf_counter() - t0
@@ -109,12 +106,46 @@ def main():
 
 
 def launch_gui():
-    from PyQt6.QtWidgets import QApplication      # torch 이후라 안전
+    # ★ c10.dll만 먼저 로드 (가벼움), torch는 로드하지 않음
+    _preload_c10_dll()
+
+    from PyQt6.QtWidgets import QApplication
     from .main_window import MainWindow
 
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
+
+    # ★ UI가 뜬 후 백그라운드에서 torch 프리로드
+    from PyQt6.QtCore import QThreadPool, QRunnable, pyqtSlot
+
+    class _TorchPreloader(QRunnable):
+        def __init__(self, status_callback):
+            super().__init__()
+            self.status_callback = status_callback
+            self.setAutoDelete(True)
+
+        @pyqtSlot()
+        def run(self):
+            try:
+                self.status_callback("PyTorch 로딩 중...")
+                import torch          # noqa: F401
+                import torchaudio     # noqa: F401
+
+                device = "CUDA" if torch.cuda.is_available() else "CPU"
+                gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
+                self.status_callback(f"PyTorch 준비 완료 ({device} | {gpu})")
+            except Exception as e:
+                self.status_callback(f"PyTorch 로드 실패: {e}")
+
+    def _update_status(msg: str):
+        # 시그널을 통해 메인 스레드에서 UI 업데이트
+        if hasattr(window, 'queue_panel') and window.queue_panel:
+            window.queue_panel.status_label.setText(msg)
+
+    preloader = _TorchPreloader(_update_status)
+    QThreadPool.globalInstance().start(preloader)
+
     sys.exit(app.exec())
 
 

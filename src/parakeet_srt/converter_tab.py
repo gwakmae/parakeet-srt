@@ -1,5 +1,5 @@
-# C:/Users/Public/Documents/Python_Code/자막작업/parakeet-srt/src/parakeet_srt/converter_tab.py
-"""파일 변환 탭 (PyQt6) — 큐 시스템 연동"""
+# src/parakeet_srt/converter_tab.py
+"""파일 변환 탭 (PyQt6) — 큐 시스템 연동 + 번역 설정"""
 from __future__ import annotations
 
 import os
@@ -10,9 +10,9 @@ from PyQt6.QtWidgets import (
     QPushButton, QFileDialog, QCheckBox, QComboBox,
     QMessageBox, QApplication, QGridLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QSpinBox, QDoubleSpinBox, QFrame,
+    QSpinBox, QDoubleSpinBox, QFrame, QLineEdit,
 )
-from PyQt6.QtCore import Qt, pyqtSlot
+from PyQt6.QtCore import Qt, pyqtSlot, QThreadPool
 
 
 SUPPORTED_EXTS = (
@@ -26,9 +26,10 @@ class ConverterTab(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.queue_manager = None   # MainWindow에서 설정
-        self.queue_panel = None     # MainWindow에서 설정
+        self.queue_manager = None
+        self.queue_panel = None
         self._adv_visible = False
+        self._trans_visible = False  # ★ 번역 패널 토글
         self._create_widgets()
         self._connect_signals()
 
@@ -83,13 +84,57 @@ class ConverterTab(QWidget):
         post_row.addStretch()
         settings_layout.addLayout(post_row)
 
-        # 완료 후 폴더 열기 옵션
+        # 완료 후 폴더 열기
         folder_row = QHBoxLayout()
         self.open_folder_cb = QCheckBox("완료 후 출력 폴더 열기")
-        self.open_folder_cb.setChecked(True)  # 디폴트 켜짐
+        self.open_folder_cb.setChecked(True)
         folder_row.addWidget(self.open_folder_cb)
         folder_row.addStretch()
         settings_layout.addLayout(folder_row)
+
+        # ★ 번역 설정 토글 + 프레임
+        trans_toggle_row = QHBoxLayout()
+        self.translate_cb = QCheckBox("전사 후 자동 번역")
+        trans_toggle_row.addWidget(self.translate_cb)
+        trans_toggle_row.addStretch()
+        self.trans_btn = QPushButton("번역 설정 ▾")
+        trans_toggle_row.addWidget(self.trans_btn)
+        settings_layout.addLayout(trans_toggle_row)
+
+        self.trans_frame = QFrame()
+        trans_grid = QGridLayout(self.trans_frame)
+
+        trans_grid.addWidget(QLabel("Ollama URL:"), 0, 0)
+        self.ollama_url_edit = QLineEdit("http://localhost:11434")
+        trans_grid.addWidget(self.ollama_url_edit, 0, 1, 1, 2)
+
+        trans_grid.addWidget(QLabel("모델:"), 1, 0)
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setMinimumWidth(250)
+        trans_grid.addWidget(self.model_combo, 1, 1)
+        self.refresh_models_btn = QPushButton("🔄 새로고침")
+        trans_grid.addWidget(self.refresh_models_btn, 1, 2)
+
+        trans_grid.addWidget(QLabel("소스 언어:"), 2, 0)
+        self.source_lang_combo = QComboBox()
+        self._populate_lang_combo(self.source_lang_combo, default="en")
+        trans_grid.addWidget(self.source_lang_combo, 2, 1)
+
+        trans_grid.addWidget(QLabel("타겟 언어:"), 3, 0)
+        self.target_lang_combo = QComboBox()
+        self._populate_lang_combo(self.target_lang_combo, default="ko")
+        trans_grid.addWidget(self.target_lang_combo, 3, 1)
+
+        trans_grid.addWidget(QLabel("배치 크기:"), 4, 0)
+        self.batch_spin = QSpinBox()
+        self.batch_spin.setRange(1, 20)
+        self.batch_spin.setValue(5)
+        self.batch_spin.setToolTip("한 번에 묶어서 번역할 자막 줄 수 (5~10 권장)")
+        trans_grid.addWidget(self.batch_spin, 4, 1)
+
+        self.trans_frame.setVisible(False)
+        settings_layout.addWidget(self.trans_frame)
 
         # Advanced 토글
         adv_btn_row = QHBoxLayout()
@@ -157,6 +202,16 @@ class ConverterTab(QWidget):
         self.status_label = QLabel("대기 중...")
         main.addWidget(self.status_label)
 
+    def _populate_lang_combo(self, combo: QComboBox, default: str = "en"):
+        from .translator import LANGUAGES
+        for code, name in LANGUAGES.items():
+            combo.addItem(f"{name} ({code})", code)
+        # 기본값 선택
+        for i in range(combo.count()):
+            if combo.itemData(i) == default:
+                combo.setCurrentIndex(i)
+                break
+
     def _connect_signals(self):
         self.add_files_btn.clicked.connect(self._add_files)
         self.add_folder_btn.clicked.connect(self._add_folder)
@@ -166,7 +221,53 @@ class ConverterTab(QWidget):
         self.ai_cb.toggled.connect(self.ai_source_combo.setEnabled)
         self.start_btn.clicked.connect(self._start_task)
 
-    # ─── 슬롯 ───
+        # ★ 번역 관련 시그널
+        self.trans_btn.clicked.connect(self._toggle_translate)
+        self.translate_cb.toggled.connect(self._on_translate_toggled)
+        self.refresh_models_btn.clicked.connect(self._refresh_models)
+
+    # ─── 번역 슬롯 ───
+    @pyqtSlot()
+    def _toggle_translate(self):
+        self._trans_visible = not self._trans_visible
+        self.trans_frame.setVisible(self._trans_visible)
+        self.trans_btn.setText("번역 설정 ▴" if self._trans_visible else "번역 설정 ▾")
+
+    @pyqtSlot(bool)
+    def _on_translate_toggled(self, checked: bool):
+        if checked and not self._trans_visible:
+            self._trans_visible = True
+            self.trans_frame.setVisible(True)
+            self.trans_btn.setText("번역 설정 ▴")
+            # 모델 목록 자동 로드
+            if self.model_combo.count() == 0:
+                self._refresh_models()
+
+    @pyqtSlot()
+    def _refresh_models(self):
+        from .translator import get_ollama_models
+        url = self.ollama_url_edit.text().strip()
+        self.refresh_models_btn.setEnabled(False)
+        self.refresh_models_btn.setText("로딩...")
+
+        current_text = self.model_combo.currentText()
+        models = get_ollama_models(url)
+
+        self.model_combo.clear()
+        if models:
+            self.model_combo.addItems(models)
+            # 이전 선택 복원
+            idx = self.model_combo.findText(current_text)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+        else:
+            self.model_combo.addItem("translategemma:12b")
+            self.status_label.setText("⚠ Ollama 연결 실패 — URL을 확인하세요.")
+
+        self.refresh_models_btn.setText("🔄 새로고침")
+        self.refresh_models_btn.setEnabled(True)
+
+    # ─── 기존 슬롯 ───
     @pyqtSlot()
     def _add_files(self):
         exts = " ".join(f"*{e}" for e in SUPPORTED_EXTS)
@@ -249,6 +350,13 @@ class ConverterTab(QWidget):
             "strong_pause_split_sec": self.strong_pause_spin.value(),
             "target_cps": self.target_cps_spin.value(),
             "enable_spacy": self.spacy_cb.isChecked(),
+            # ★ 번역 설정
+            "translate_enabled": self.translate_cb.isChecked(),
+            "translate_ollama_url": self.ollama_url_edit.text().strip(),
+            "translate_model": self.model_combo.currentText().strip(),
+            "translate_source_lang": self.source_lang_combo.currentData(),
+            "translate_target_lang": self.target_lang_combo.currentData(),
+            "translate_batch_size": self.batch_spin.value(),
         }
 
         params = {
@@ -263,12 +371,12 @@ class ConverterTab(QWidget):
 
         job = self.queue_manager.add_job("file", params)
 
-        # 큐 패널에 행 추가
         desc = f"{len(file_paths)}개 파일"
+        if self.translate_cb.isChecked():
+            desc += f" + 번역({self.target_lang_combo.currentData()})"
         if self.queue_panel:
             self.queue_panel.add_job_row(job, desc)
 
-        # 파일 목록 초기화
         self.file_table.setRowCount(0)
 
         if self.queue_manager.is_running:

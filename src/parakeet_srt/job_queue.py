@@ -1,4 +1,4 @@
-# C:/Users/Public/Documents/Python_Code/자막작업/parakeet-srt/src/parakeet_srt/job_queue.py
+# src/parakeet_srt/job_queue.py
 """작업 큐 매니저 — 작업 중에도 새 작업을 추가하고 순차 실행"""
 from __future__ import annotations
 
@@ -18,29 +18,25 @@ from .worker_signals import WorkerSignals
 
 @dataclass
 class Job:
-    """큐에 들어가는 하나의 작업 단위."""
     job_id: int
-    job_type: str                   # "youtube" | "file"
+    job_type: str
     params: dict = field(default_factory=dict)
-    status: str = "대기"             # 대기 | 진행중 | 완료 | 실패 | 취소
+    status: str = "대기"
 
 
 class JobQueueSignals(QObject):
-    """큐 매니저 → UI 시그널."""
-    job_started = pyqtSignal(int)              # job_id
-    job_progress = pyqtSignal(int, str)        # job_id, message
-    job_finished = pyqtSignal(int, list, list)  # job_id, success_list, failure_list
-    job_error = pyqtSignal(int, str)           # job_id, error_msg
-    queue_empty = pyqtSignal()                 # 모든 작업 완료
-    model_status = pyqtSignal(str)             # 모델 상태 메시지
-    open_folder = pyqtSignal(str)              # 완료 후 열어야 할 폴더 경로
+    job_started = pyqtSignal(int)
+    job_progress = pyqtSignal(int, str)
+    job_finished = pyqtSignal(int, list, list)
+    job_error = pyqtSignal(int, str)
+    queue_empty = pyqtSignal()
+    model_status = pyqtSignal(str)
+    open_folder = pyqtSignal(str)
 
 
 class _ModelLoaderWorker(QRunnable):
-    """모델 로딩을 백그라운드에서 수행하는 QRunnable."""
-
     class Signals(QObject):
-        finished = pyqtSignal(bool, str)  # success, error_message
+        finished = pyqtSignal(bool, str)
 
     def __init__(self, transcriber: ParakeetTranscriber):
         super().__init__()
@@ -58,16 +54,7 @@ class _ModelLoaderWorker(QRunnable):
 
 
 class _JobRunnerWorker(QRunnable):
-    """실제 작업을 수행하는 QRunnable.
-    큐 매니저가 하나씩 꺼내서 실행한다.
-    모델(transcriber)은 외부에서 주입받아 재사용."""
-
-    def __init__(
-        self,
-        job: Job,
-        transcriber: ParakeetTranscriber,
-        signals: JobQueueSignals,
-    ):
+    def __init__(self, job: Job, transcriber: ParakeetTranscriber, signals: JobQueueSignals):
         super().__init__()
         self.job = job
         self.transcriber = transcriber
@@ -221,11 +208,13 @@ class _JobRunnerWorker(QRunnable):
                             shutil.copy2(str(audio_path), str(dest))
                             self._log(f"  ├─ Audio: {dest.name}")
 
+                    # ★ 변경: blocks를 _post_process에 전달
                     extras = self._post_process(
                         srt_path, save_folder, safe_title,
                         options.get("do_txt", False),
                         options.get("do_ai", False),
                         options.get("ai_source", "txt"),
+                        blocks,
                     )
 
                     msg = f"'{safe_title}' → SRT ({len(blocks)})"
@@ -244,7 +233,6 @@ class _JobRunnerWorker(QRunnable):
             except Exception:
                 pass
 
-        # 완료 후 폴더 열기 요청
         if options.get("open_folder") and success and not self.is_cancelled:
             self.signals.open_folder.emit(str(save_folder))
 
@@ -267,7 +255,7 @@ class _JobRunnerWorker(QRunnable):
 
         success, failure = [], []
         total = len(file_paths)
-        opened_folders: set[str] = set()  # 중복 열기 방지
+        opened_folders: set[str] = set()
 
         for i, fp in enumerate(file_paths):
             if self.is_cancelled:
@@ -286,18 +274,19 @@ class _JobRunnerWorker(QRunnable):
                 write_srt(blocks, srt_path)
                 self._log(f"  ├─ SRT: {srt_path.name} ({len(blocks)} subs)")
 
+                # ★ 변경: blocks를 _post_process에 전달
                 extras = self._post_process(
                     srt_path, output_dir, input_path.stem,
                     options.get("do_txt", False),
                     options.get("do_ai", False),
                     options.get("ai_source", "txt"),
+                    blocks,
                 )
                 msg = f"'{input_path.name}' → SRT ({len(blocks)})"
                 if extras:
                     msg += f", {extras}"
                 success.append(msg)
 
-                # 출력 폴더 수집
                 opened_folders.add(str(output_dir))
 
             except Exception as e:
@@ -305,7 +294,6 @@ class _JobRunnerWorker(QRunnable):
                 traceback.print_exc()
                 failure.append(f"'{input_path.name}': {e}")
 
-        # 완료 후 폴더 열기 요청 (중복 제거)
         if options.get("open_folder") and success and not self.is_cancelled:
             for folder in opened_folders:
                 self.signals.open_folder.emit(folder)
@@ -332,9 +320,11 @@ class _JobRunnerWorker(QRunnable):
 
         return format_segments_to_blocks(all_segments, cfg)
 
+    # ★ 변경: blocks 파라미터 추가, 번역 로직 삽입
     def _post_process(
         self, srt_path: Path, output_dir: Path, stem: str,
         do_txt: bool, do_ai: bool, ai_source: str,
+        blocks: list | None = None,
     ) -> str:
         from .srt_generator import write_txt, srt_to_plain_text
         from .ai_prompts import create_ai_prompt_file
@@ -364,13 +354,42 @@ class _JobRunnerWorker(QRunnable):
                 extras.append("AI-Prompt")
                 self._log(f"  ├─ AI Prompt: {prompt_path.name}")
 
+        # ★ 번역 처리
+        cfg = self.transcriber.cfg
+        if getattr(cfg, "translate_enabled", False) and blocks:
+            try:
+                from .translator import (
+                    TranslationConfig, translate_blocks, write_translated_srt,
+                )
+
+                t_cfg = TranslationConfig(
+                    enabled=True,
+                    ollama_url=cfg.translate_ollama_url,
+                    model=cfg.translate_model,
+                    source_lang=cfg.translate_source_lang,
+                    target_lang=cfg.translate_target_lang,
+                    batch_size=cfg.translate_batch_size,
+                    temperature=cfg.translate_temperature,
+                )
+
+                self._log(f"  ├─ 번역 중... ({t_cfg.model})")
+                translated = translate_blocks(blocks, t_cfg, log_fn=self._log)
+
+                if translated:
+                    lang_code = cfg.translate_target_lang
+                    translated_srt_path = output_dir / f"{stem}.{lang_code}.srt"
+                    write_translated_srt(translated, translated_srt_path)
+                    extras.append(f"번역SRT({lang_code})")
+                    self._log(f"  ├─ 번역 SRT: {translated_srt_path.name}")
+
+            except Exception as e:
+                self._log(f"  ├─ ⚠ 번역 실패: {e}")
+                traceback.print_exc()
+
         return ", ".join(extras)
 
 
 class JobQueueManager(QObject):
-    """작업 큐를 관리하며, 하나씩 순차 실행.
-    모델은 첫 작업 시 로드하고, 큐가 비면 해제."""
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.signals = JobQueueSignals()
@@ -379,13 +398,11 @@ class JobQueueManager(QObject):
         self._current_worker: _JobRunnerWorker | None = None
         self._current_job: Job | None = None
         self._is_running: bool = False
-        self._model_loading: bool = False  # 모델 로딩 중 플래그
+        self._model_loading: bool = False
 
-        # 모델을 큐 매니저가 관리
         self._cfg = Config()
         self._transcriber: ParakeetTranscriber | None = None
 
-        # 시그널은 한 번만 연결 (중복 connect 방지)
         self.signals.job_finished.connect(self._on_job_finished)
         self.signals.job_error.connect(self._on_job_error)
 
@@ -402,23 +419,16 @@ class JobQueueManager(QObject):
         return self._current_job
 
     def add_job(self, job_type: str, params: dict) -> Job:
-        """큐에 새 작업 추가. 작업 중이면 대기열에 들어감."""
-        job = Job(
-            job_id=self._next_id,
-            job_type=job_type,
-            params=params,
-        )
+        job = Job(job_id=self._next_id, job_type=job_type, params=params)
         self._next_id += 1
         self._queue.append(job)
 
-        # 현재 작업 중이 아니고 모델 로딩 중도 아니면 바로 시작
         if not self._is_running and not self._model_loading:
             self._process_next()
 
         return job
 
     def remove_job(self, job_id: int) -> bool:
-        """대기 중인 작업 제거. 진행 중인 작업은 제거 불가."""
         for i, job in enumerate(self._queue):
             if job.job_id == job_id and job.status == "대기":
                 self._queue.pop(i)
@@ -426,12 +436,10 @@ class JobQueueManager(QObject):
         return False
 
     def cancel_current(self):
-        """현재 진행 중인 작업 취소."""
         if self._current_worker:
             self._current_worker.cancel()
 
     def cancel_all(self):
-        """현재 작업 취소 + 대기열 모두 제거."""
         self.cancel_current()
         for job in self._queue:
             if job.status == "대기":
@@ -439,7 +447,6 @@ class JobQueueManager(QObject):
         self._queue.clear()
 
     def _ensure_transcriber_instance(self):
-        """Transcriber 인스턴스만 생성 (모델 로드는 하지 않음)."""
         if self._transcriber is None:
             self._cfg = Config()
             self._transcriber = ParakeetTranscriber(
@@ -448,7 +455,6 @@ class JobQueueManager(QObject):
             )
 
     def _release_model(self):
-        """모델 해제."""
         if self._transcriber:
             try:
                 self._transcriber.release_model()
@@ -469,8 +475,6 @@ class JobQueueManager(QObject):
             pass
 
     def _process_next(self):
-        """대기열에서 다음 작업을 꺼내 실행."""
-        # 대기 중인 작업 찾기
         next_job = None
         for job in self._queue:
             if job.status == "대기":
@@ -478,7 +482,6 @@ class JobQueueManager(QObject):
                 break
 
         if next_job is None:
-            # 큐 비었음 → 모델 해제
             self._is_running = False
             self._current_job = None
             self._current_worker = None
@@ -489,10 +492,8 @@ class JobQueueManager(QObject):
         self._is_running = True
         self._current_job = next_job
 
-        # Transcriber 인스턴스 확보
         self._ensure_transcriber_instance()
 
-        # 모델이 아직 로드되지 않았으면 백그라운드에서 로드
         if self._transcriber._model is None:
             self._model_loading = True
             self.signals.model_status.emit("모델 로드 중...")
@@ -502,16 +503,13 @@ class JobQueueManager(QObject):
             QThreadPool.globalInstance().start(loader)
             return
 
-        # 모델이 이미 로드되어 있으면 바로 작업 실행
         self._start_job_worker(next_job)
 
     @pyqtSlot(bool, str)
     def _on_model_loaded(self, success: bool, error_msg: str):
-        """모델 로딩 완료 콜백 (메인 스레드에서 실행됨)."""
         self._model_loading = False
 
         if not success:
-            # 모델 로드 실패
             if self._current_job:
                 self._current_job.status = "실패"
                 self.signals.job_error.emit(
@@ -521,43 +519,32 @@ class JobQueueManager(QObject):
 
         self.signals.model_status.emit("모델 로드 완료.")
 
-        # 현재 작업이 아직 유효한지 확인 (취소되었을 수 있음)
         if self._current_job and self._current_job.status != "취소":
             self._start_job_worker(self._current_job)
         else:
-            # 취소된 경우 다음 작업으로
             self._process_next()
 
     def _start_job_worker(self, job: Job):
-        """실제 작업 워커를 시작."""
         worker = _JobRunnerWorker(job, self._transcriber, self.signals)
         self._current_worker = worker
         QThreadPool.globalInstance().start(worker)
 
     @pyqtSlot(int, list, list)
     def _on_job_finished(self, job_id: int, success: list, failure: list):
-        """작업 완료 시 큐에서 제거하고 다음 작업 시작."""
-        # 현재 진행 중인 작업이 맞는지 확인
         if self._current_job is None or self._current_job.job_id != job_id:
             return
 
         self._queue = [j for j in self._queue if j.job_id != job_id]
         self._current_worker = None
         self._current_job = None
-
-        # 다음 작업
         self._process_next()
 
     @pyqtSlot(int, str)
     def _on_job_error(self, job_id: int, msg: str):
-        """작업 에러 시 큐에서 제거하고 다음 작업 시작."""
-        # 현재 진행 중인 작업이 맞는지 확인
         if self._current_job is not None and self._current_job.job_id != job_id:
             return
 
         self._queue = [j for j in self._queue if j.job_id != job_id]
         self._current_worker = None
         self._current_job = None
-
-        # 다음 작업
         self._process_next()

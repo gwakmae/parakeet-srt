@@ -1,5 +1,5 @@
-# C:/Users/Public/Documents/Python_Code/자막작업/parakeet-srt/src/parakeet_srt/youtube_tab.py
-"""YouTube 다운로드 탭 (PyQt6) — 큐 시스템 연동"""
+# src/parakeet_srt/youtube_tab.py
+"""YouTube 다운로드 탭 (PyQt6) — 큐 시스템 연동 + 번역 설정"""
 from __future__ import annotations
 
 import os
@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QPushButton, QFileDialog, QCheckBox, QComboBox,
     QRadioButton, QMessageBox, QButtonGroup, QApplication,
     QGridLayout, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView,
+    QAbstractItemView, QSpinBox, QFrame,
 )
 from PyQt6.QtCore import Qt, pyqtSlot, QThreadPool
 
@@ -23,11 +23,12 @@ class YouTubeTab(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.queue_manager = None   # MainWindow에서 설정
-        self.queue_panel = None     # MainWindow에서 설정
+        self.queue_manager = None
+        self.queue_panel = None
         self.update_worker = None
         self.extract_start_entries: list[QLineEdit] = []
         self.extract_end_entries: list[QLineEdit] = []
+        self._trans_visible = False
 
         default_dl = Path.home() / "Downloads"
         self.folder_path = str(default_dl if default_dl.is_dir() else Path.home())
@@ -35,7 +36,6 @@ class YouTubeTab(QWidget):
         self._create_widgets()
         self._connect_signals()
 
-    # ─── UI 구성 ───
     def _create_widgets(self):
         main = QVBoxLayout(self)
 
@@ -88,7 +88,7 @@ class YouTubeTab(QWidget):
         row1.addStretch()
         opt_layout.addLayout(row1)
 
-        # 시간 입력 프레임 (숨김)
+        # 시간 입력 프레임
         self.extract_frame = QGroupBox("추출 범위 (HH:MM:SS)")
         self.extract_grid = QGridLayout(self.extract_frame)
 
@@ -127,13 +127,57 @@ class YouTubeTab(QWidget):
         row2.addStretch()
         opt_layout.addLayout(row2)
 
-        # 완료 후 폴더 열기 옵션
+        # 완료 후 폴더 열기
         folder_open_row = QHBoxLayout()
         self.open_folder_cb = QCheckBox("완료 후 출력 폴더 열기")
-        self.open_folder_cb.setChecked(True)  # 디폴트 켜짐
+        self.open_folder_cb.setChecked(True)
         folder_open_row.addWidget(self.open_folder_cb)
         folder_open_row.addStretch()
         opt_layout.addLayout(folder_open_row)
+
+        # ★ 번역 설정
+        trans_toggle_row = QHBoxLayout()
+        self.translate_cb = QCheckBox("전사 후 자동 번역")
+        trans_toggle_row.addWidget(self.translate_cb)
+        trans_toggle_row.addStretch()
+        self.trans_btn = QPushButton("번역 설정 ▾")
+        trans_toggle_row.addWidget(self.trans_btn)
+        opt_layout.addLayout(trans_toggle_row)
+
+        self.trans_frame = QFrame()
+        trans_grid = QGridLayout(self.trans_frame)
+
+        trans_grid.addWidget(QLabel("Ollama URL:"), 0, 0)
+        self.ollama_url_edit = QLineEdit("http://localhost:11434")
+        trans_grid.addWidget(self.ollama_url_edit, 0, 1, 1, 2)
+
+        trans_grid.addWidget(QLabel("모델:"), 1, 0)
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setMinimumWidth(250)
+        trans_grid.addWidget(self.model_combo, 1, 1)
+        self.refresh_models_btn = QPushButton("🔄 새로고침")
+        trans_grid.addWidget(self.refresh_models_btn, 1, 2)
+
+        trans_grid.addWidget(QLabel("소스 언어:"), 2, 0)
+        self.source_lang_combo = QComboBox()
+        self._populate_lang_combo(self.source_lang_combo, default="en")
+        trans_grid.addWidget(self.source_lang_combo, 2, 1)
+
+        trans_grid.addWidget(QLabel("타겟 언어:"), 3, 0)
+        self.target_lang_combo = QComboBox()
+        self._populate_lang_combo(self.target_lang_combo, default="ko")
+        trans_grid.addWidget(self.target_lang_combo, 3, 1)
+
+        trans_grid.addWidget(QLabel("배치 크기:"), 4, 0)
+        self.batch_spin = QSpinBox()
+        self.batch_spin.setRange(1, 20)
+        self.batch_spin.setValue(5)
+        self.batch_spin.setToolTip("한 번에 묶어서 번역할 자막 줄 수 (5~10 권장)")
+        trans_grid.addWidget(self.batch_spin, 4, 1)
+
+        self.trans_frame.setVisible(False)
+        opt_layout.addWidget(self.trans_frame)
 
         main.addWidget(opt_group)
 
@@ -149,6 +193,15 @@ class YouTubeTab(QWidget):
 
         self.status_label = QLabel("대기 중...")
         main.addWidget(self.status_label)
+
+    def _populate_lang_combo(self, combo: QComboBox, default: str = "en"):
+        from .translator import LANGUAGES
+        for code, name in LANGUAGES.items():
+            combo.addItem(f"{name} ({code})", code)
+        for i in range(combo.count()):
+            if combo.itemData(i) == default:
+                combo.setCurrentIndex(i)
+                break
 
     def _add_range_row(self, index):
         row = index + 1
@@ -176,6 +229,50 @@ class YouTubeTab(QWidget):
         self.ai_cb.toggled.connect(self.ai_source_combo.setEnabled)
         self.start_btn.clicked.connect(self._start_task)
         self.update_ytdlp_btn.clicked.connect(self._start_ytdlp_update)
+
+        # ★ 번역 관련
+        self.trans_btn.clicked.connect(self._toggle_translate)
+        self.translate_cb.toggled.connect(self._on_translate_toggled)
+        self.refresh_models_btn.clicked.connect(self._refresh_models)
+
+    # ─── 번역 슬롯 ───
+    @pyqtSlot()
+    def _toggle_translate(self):
+        self._trans_visible = not self._trans_visible
+        self.trans_frame.setVisible(self._trans_visible)
+        self.trans_btn.setText("번역 설정 ▴" if self._trans_visible else "번역 설정 ▾")
+
+    @pyqtSlot(bool)
+    def _on_translate_toggled(self, checked: bool):
+        if checked and not self._trans_visible:
+            self._trans_visible = True
+            self.trans_frame.setVisible(True)
+            self.trans_btn.setText("번역 설정 ▴")
+            if self.model_combo.count() == 0:
+                self._refresh_models()
+
+    @pyqtSlot()
+    def _refresh_models(self):
+        from .translator import get_ollama_models
+        url = self.ollama_url_edit.text().strip()
+        self.refresh_models_btn.setEnabled(False)
+        self.refresh_models_btn.setText("로딩...")
+
+        current_text = self.model_combo.currentText()
+        models = get_ollama_models(url)
+
+        self.model_combo.clear()
+        if models:
+            self.model_combo.addItems(models)
+            idx = self.model_combo.findText(current_text)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+        else:
+            self.model_combo.addItem("translategemma:12b")
+            self.status_label.setText("⚠ Ollama 연결 실패 — URL을 확인하세요.")
+
+        self.refresh_models_btn.setText("🔄 새로고침")
+        self.refresh_models_btn.setEnabled(True)
 
     # ─── URL 관리 ───
     @pyqtSlot()
@@ -316,14 +413,23 @@ class YouTubeTab(QWidget):
             "open_folder": self.open_folder_cb.isChecked(),
         }
 
+        # ★ 번역 설정을 cfg_overrides에 포함
+        cfg_overrides = {
+            "translate_enabled": self.translate_cb.isChecked(),
+            "translate_ollama_url": self.ollama_url_edit.text().strip(),
+            "translate_model": self.model_combo.currentText().strip(),
+            "translate_source_lang": self.source_lang_combo.currentData(),
+            "translate_target_lang": self.target_lang_combo.currentData(),
+            "translate_batch_size": self.batch_spin.value(),
+        }
+
         params = {
             "urls": urls,
             "save_folder": str(save_folder),
             "options": options,
-            "cfg_overrides": {},
+            "cfg_overrides": cfg_overrides,
         }
 
-        # 큐에 추가
         if self.queue_manager is None:
             QMessageBox.critical(self, "오류", "큐 매니저가 초기화되지 않았습니다.")
             return
@@ -332,6 +438,8 @@ class YouTubeTab(QWidget):
 
         # 큐 패널에 행 추가
         desc = f"{len(urls)}개 URL → {save_folder.name}"
+        if self.translate_cb.isChecked():
+            desc += f" + 번역({self.target_lang_combo.currentData()})"
         if self.queue_panel:
             self.queue_panel.add_job_row(job, desc)
 
