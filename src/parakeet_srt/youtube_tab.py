@@ -45,7 +45,7 @@ class YouTubeTab(QWidget):
 
         url_row = QHBoxLayout()
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("YouTube URL 입력 후 추가")
+        self.url_input.setPlaceholderText("YouTube URL 입력 후 추가 또는 바로 작업 시작")
         self.add_btn = QPushButton("목록에 추가")
         self.del_btn = QPushButton("선택 삭제")
         url_row.addWidget(QLabel("URL:"))
@@ -269,7 +269,7 @@ class YouTubeTab(QWidget):
                 self.model_combo.setCurrentIndex(idx)
         else:
             self.model_combo.addItem("translategemma:12b")
-            self.status_label.setText("⚠ Ollama 연결 실패 — URL을 확인하세요.")
+            self.status_label.setText("⚠ Ollama 연결 실패 – URL을 확인하세요.")
 
         self.refresh_models_btn.setText("🔄 새로고침")
         self.refresh_models_btn.setEnabled(True)
@@ -377,9 +377,17 @@ class YouTubeTab(QWidget):
     # ─── 메인 작업 실행 (큐에 추가) ───
     @pyqtSlot()
     def _start_task(self):
+        # ★ 큐가 비어있고 URL 입력창에 내용이 있으면 자동으로 추가
+        if self.queue_table.rowCount() == 0:
+            url = self.url_input.text().strip()
+            if url:
+                self._add_url()
+            else:
+                QMessageBox.warning(self, "입력 오류", "URL을 입력하거나 목록에 추가하세요.")
+                return
+
         count = self.queue_table.rowCount()
         if count == 0:
-            QMessageBox.warning(self, "입력 오류", "URL을 추가하세요.")
             return
 
         save_folder = self._resolve_save_folder()

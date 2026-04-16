@@ -29,7 +29,7 @@ class ConverterTab(QWidget):
         self.queue_manager = None
         self.queue_panel = None
         self._adv_visible = False
-        self._trans_visible = False  # ★ 번역 패널 토글
+        self._trans_visible = False
         self._create_widgets()
         self._connect_signals()
 
@@ -206,7 +206,6 @@ class ConverterTab(QWidget):
         from .translator import LANGUAGES
         for code, name in LANGUAGES.items():
             combo.addItem(f"{name} ({code})", code)
-        # 기본값 선택
         for i in range(combo.count()):
             if combo.itemData(i) == default:
                 combo.setCurrentIndex(i)
@@ -239,7 +238,6 @@ class ConverterTab(QWidget):
             self._trans_visible = True
             self.trans_frame.setVisible(True)
             self.trans_btn.setText("번역 설정 ▴")
-            # 모델 목록 자동 로드
             if self.model_combo.count() == 0:
                 self._refresh_models()
 
@@ -256,13 +254,12 @@ class ConverterTab(QWidget):
         self.model_combo.clear()
         if models:
             self.model_combo.addItems(models)
-            # 이전 선택 복원
             idx = self.model_combo.findText(current_text)
             if idx >= 0:
                 self.model_combo.setCurrentIndex(idx)
         else:
             self.model_combo.addItem("translategemma:12b")
-            self.status_label.setText("⚠ Ollama 연결 실패 — URL을 확인하세요.")
+            self.status_label.setText("⚠ Ollama 연결 실패 – URL을 확인하세요.")
 
         self.refresh_models_btn.setText("🔄 새로고침")
         self.refresh_models_btn.setEnabled(True)
@@ -324,13 +321,22 @@ class ConverterTab(QWidget):
 
     @pyqtSlot()
     def _start_task(self):
-        count = self.file_table.rowCount()
-        if count == 0:
-            QMessageBox.warning(self, "입력 오류", "파일을 추가하세요.")
-            return
+        # ★ converter_tab은 파일 다이얼로그로 추가하는 방식이므로
+        #    파일 목록이 비어있으면 파일 추가 다이얼로그를 자동으로 열어줌
+        if self.file_table.rowCount() == 0:
+            reply = QMessageBox.question(
+                self, "파일 없음",
+                "파일 목록이 비어있습니다. 파일을 추가하시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._add_files()
+            if self.file_table.rowCount() == 0:
+                return
 
         file_paths = []
-        for r in range(count):
+        for r in range(self.file_table.rowCount()):
             item = self.file_table.item(r, 0)
             if item:
                 file_paths.append(item.data(Qt.ItemDataRole.UserRole))
