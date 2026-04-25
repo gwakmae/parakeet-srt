@@ -8,22 +8,6 @@ import sys
 import argparse
 
 
-def _preload_c10_dll():
-    """PyTorch 2.9.x Windows 버그 대응: c10.dll 사전 로드."""
-    if platform.system() != "Windows":
-        return
-    import ctypes
-    from importlib.util import find_spec
-    try:
-        _spec = find_spec("torch")
-        if _spec and _spec.origin:
-            _dll = os.path.join(os.path.dirname(_spec.origin), "lib", "c10.dll")
-            if os.path.exists(_dll):
-                ctypes.CDLL(os.path.normpath(_dll))
-    except Exception:
-        pass
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Parakeet TDT 0.6B v3 — English subtitle generator"
@@ -47,8 +31,7 @@ def main():
         launch_gui()
         return
 
-    # CLI 모드 — torch 필요하므로 여기서 동기 로드
-    _preload_c10_dll()
+    # CLI 모드
     import torch          # noqa: F401
     import torchaudio     # noqa: F401
 
@@ -106,47 +89,61 @@ def main():
 
 
 def launch_gui():
-    # ★ c10.dll만 먼저 로드 (가벼움), torch는 로드하지 않음
-    _preload_c10_dll()
+    """PyQt6 GUI를 실행한다.
 
-    from PyQt6.QtWidgets import QApplication
-    from .main_window import MainWindow
+    ★ 핵심: Windows에서 PyQt6를 먼저 import하면 torch의 c10.dll 로드가
+    실패하는 버그가 있다 (PyTorch 2.9.0+, pytorch/pytorch#166628).
+    따라서 반드시 torch를 PyQt6보다 먼저 import해야 한다.
+    """
+    import traceback
 
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
+    try:
+        # ────────────────────────────────────────────────
+        # ★ Step 1: torch를 PyQt6보다 먼저 import (DLL 충돌 방지)
+        # ────────────────────────────────────────────────
+        print("PyTorch 로딩 중...")
+        import warnings
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        warnings.filterwarnings("ignore", message=".*Megatron.*")
+        warnings.filterwarnings("ignore", message=".*RequestsDependencyWarning.*")
 
-    # ★ UI가 뜬 후 백그라운드에서 torch 프리로드
-    from PyQt6.QtCore import QThreadPool, QRunnable, pyqtSlot
+        import logging
+        logging.getLogger("nemo_logger").setLevel(logging.ERROR)
 
-    class _TorchPreloader(QRunnable):
-        def __init__(self, status_callback):
-            super().__init__()
-            self.status_callback = status_callback
-            self.setAutoDelete(True)
+        import torch
+        try:
+            import torchaudio  # noqa: F401
+        except Exception:
+            pass
 
-        @pyqtSlot()
-        def run(self):
-            try:
-                self.status_callback("PyTorch 로딩 중...")
-                import torch          # noqa: F401
-                import torchaudio     # noqa: F401
+        device = "CUDA" if torch.cuda.is_available() else "CPU"
+        gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
+        torch_info = f"PyTorch 준비 완료 ({device} | {gpu})"
+        print(torch_info)
 
-                device = "CUDA" if torch.cuda.is_available() else "CPU"
-                gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
-                self.status_callback(f"PyTorch 준비 완료 ({device} | {gpu})")
-            except Exception as e:
-                self.status_callback(f"PyTorch 로드 실패: {e}")
+        # ────────────────────────────────────────────────
+        # ★ Step 2: 그 다음에 PyQt6 import 및 GUI 실행
+        # ────────────────────────────────────────────────
+        from PyQt6.QtWidgets import QApplication
+        from .main_window import MainWindow
 
-    def _update_status(msg: str):
-        # 시그널을 통해 메인 스레드에서 UI 업데이트
+        app = QApplication(sys.argv)
+        window = MainWindow()
+
+        # 상태 표시
         if hasattr(window, 'queue_panel') and window.queue_panel:
-            window.queue_panel.status_label.setText(msg)
+            window.queue_panel.status_label.setText(torch_info)
 
-    preloader = _TorchPreloader(_update_status)
-    QThreadPool.globalInstance().start(preloader)
+        window.show()
+        sys.exit(app.exec())
 
-    sys.exit(app.exec())
+    except Exception:
+        traceback.print_exc()
+        print("\n[ERROR] GUI 실행 중 오류가 발생했습니다.")
+        try:
+            input("Press Enter to exit...")
+        except EOFError:
+            pass
 
 
 if __name__ == "__main__":

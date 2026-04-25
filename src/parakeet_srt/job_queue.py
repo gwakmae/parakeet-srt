@@ -131,6 +131,9 @@ class _JobRunnerWorker(QRunnable):
         temp_dir = Path(tempfile.mkdtemp(prefix="parakeet_yt_"))
         success, failure = [], []
 
+        # ★ 1단계: 모든 URL 전사 먼저 완료 → (srt_path, blocks, safe_title, video_path, audio_path) 저장
+        transcribe_results = []
+
         try:
             total = len(urls)
             for i, url in enumerate(urls):
@@ -208,19 +211,8 @@ class _JobRunnerWorker(QRunnable):
                             shutil.copy2(str(audio_path), str(dest))
                             self._log(f"  ├─ Audio: {dest.name}")
 
-                    # ★ 변경: blocks를 _post_process에 전달
-                    extras = self._post_process(
-                        srt_path, save_folder, safe_title,
-                        options.get("do_txt", False),
-                        options.get("do_ai", False),
-                        options.get("ai_source", "txt"),
-                        blocks,
-                    )
-
-                    msg = f"'{safe_title}' → SRT ({len(blocks)})"
-                    if extras:
-                        msg += f", {extras}"
-                    success.append(msg)
+                    # ★ 전사 결과 저장 (후처리는 나중에)
+                    transcribe_results.append((srt_path, blocks, safe_title))
 
                 except Exception as e:
                     self._log(f"  └─ ERROR: {e}")
@@ -232,6 +224,36 @@ class _JobRunnerWorker(QRunnable):
                 shutil.rmtree(temp_dir, ignore_errors=True)
             except Exception:
                 pass
+
+        # ★ 2단계: 번역이 필요한 경우 Parakeet 모델 해제 → VRAM 확보
+        translate_enabled = getattr(cfg, "translate_enabled", False)
+        if translate_enabled and transcribe_results and not self.is_cancelled:
+            self._log(f"\n{'═' * 50}")
+            self._log("  ★ 전사 완료 — Parakeet 모델 해제 (VRAM 확보 후 번역 시작)")
+            self.transcriber.release_model()
+
+        # ★ 3단계: 후처리 (TXT, AI프롬프트, 번역) 실행
+        for srt_path, blocks, safe_title in transcribe_results:
+            if self.is_cancelled:
+                break
+
+            try:
+                extras = self._post_process(
+                    srt_path, save_folder, safe_title,
+                    options.get("do_txt", False),
+                    options.get("do_ai", False),
+                    options.get("ai_source", "txt"),
+                    blocks,
+                )
+                msg = f"'{safe_title}' → SRT ({len(blocks)})"
+                if extras:
+                    msg += f", {extras}"
+                success.append(msg)
+
+            except Exception as e:
+                self._log(f"  └─ ERROR (후처리): {e}")
+                traceback.print_exc()
+                failure.append(f"'{safe_title}' 후처리: {e}")
 
         if options.get("open_folder") and success and not self.is_cancelled:
             self.signals.open_folder.emit(str(save_folder))
@@ -257,6 +279,9 @@ class _JobRunnerWorker(QRunnable):
         total = len(file_paths)
         opened_folders: set[str] = set()
 
+        # ★ 1단계: 모든 파일 전사 먼저 완료 → (srt_path, blocks, output_dir, stem) 저장
+        transcribe_results = []
+
         for i, fp in enumerate(file_paths):
             if self.is_cancelled:
                 break
@@ -274,25 +299,43 @@ class _JobRunnerWorker(QRunnable):
                 write_srt(blocks, srt_path)
                 self._log(f"  ├─ SRT: {srt_path.name} ({len(blocks)} subs)")
 
-                # ★ 변경: blocks를 _post_process에 전달
-                extras = self._post_process(
-                    srt_path, output_dir, input_path.stem,
-                    options.get("do_txt", False),
-                    options.get("do_ai", False),
-                    options.get("ai_source", "txt"),
-                    blocks,
-                )
-                msg = f"'{input_path.name}' → SRT ({len(blocks)})"
-                if extras:
-                    msg += f", {extras}"
-                success.append(msg)
-
+                transcribe_results.append((srt_path, blocks, output_dir, input_path.stem))
                 opened_folders.add(str(output_dir))
 
             except Exception as e:
                 self._log(f"  └─ ERROR: {e}")
                 traceback.print_exc()
                 failure.append(f"'{input_path.name}': {e}")
+
+        # ★ 2단계: 번역이 필요한 경우 Parakeet 모델 해제 → VRAM 확보
+        translate_enabled = getattr(cfg, "translate_enabled", False)
+        if translate_enabled and transcribe_results and not self.is_cancelled:
+            self._log(f"\n{'─' * 50}")
+            self._log("  ★ 전사 완료 — Parakeet 모델 해제 (VRAM 확보 후 번역 시작)")
+            self.transcriber.release_model()
+
+        # ★ 3단계: 후처리 (TXT, AI프롬프트, 번역) 실행
+        for srt_path, blocks, output_dir, stem in transcribe_results:
+            if self.is_cancelled:
+                break
+
+            try:
+                extras = self._post_process(
+                    srt_path, output_dir, stem,
+                    options.get("do_txt", False),
+                    options.get("do_ai", False),
+                    options.get("ai_source", "txt"),
+                    blocks,
+                )
+                msg = f"'{srt_path.name}' → SRT ({len(blocks)})"
+                if extras:
+                    msg += f", {extras}"
+                success.append(msg)
+
+            except Exception as e:
+                self._log(f"  └─ ERROR (후처리): {e}")
+                traceback.print_exc()
+                failure.append(f"'{srt_path.name}' 후처리: {e}")
 
         if options.get("open_folder") and success and not self.is_cancelled:
             for folder in opened_folders:
@@ -320,7 +363,6 @@ class _JobRunnerWorker(QRunnable):
 
         return format_segments_to_blocks(all_segments, cfg)
 
-    # ★ 변경: blocks 파라미터 추가, 번역 로직 삽입
     def _post_process(
         self, srt_path: Path, output_dir: Path, stem: str,
         do_txt: bool, do_ai: bool, ai_source: str,
